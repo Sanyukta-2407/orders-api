@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-app = FastAPI()
+app = FastAPI(title="Orders API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,18 +23,21 @@ WINDOW = 10
 
 catalog = [{"id": i, "item": f"Order {i}"} for i in range(1, TOTAL_ORDERS + 1)]
 
-idempotency = {}
-client_hits = {}
+idempotency_store = {}
+rate_store = {}
 
 
 class OrderRequest(BaseModel):
     item: str = "New Order"
 
 
-def rate_limit(client_id: str):
+def check_rate_limit(client_id: str):
     now = time.time()
 
-    q = client_hits.setdefault(client_id, deque())
+    if client_id not in rate_store:
+        rate_store[client_id] = deque()
+
+    q = rate_store[client_id]
 
     while q and now - q[0] >= WINDOW:
         q.popleft()
@@ -59,15 +62,18 @@ def root():
 @app.post("/orders")
 def create_order(
     body: OrderRequest,
-    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
-    x_client_id: str = Header("default", alias="X-Client-Id"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    x_client_id: str = Header(default="default", alias="X-Client-Id"),
 ):
-    limited = rate_limit(x_client_id)
+    limited = check_rate_limit(x_client_id)
     if limited:
         return limited
 
-    if idempotency_key and idempotency_key in idempotency:
-        return idempotency[idempotency_key]
+    if idempotency_key and idempotency_key in idempotency_store:
+        return JSONResponse(
+            status_code=201,
+            content=idempotency_store[idempotency_key],
+        )
 
     order = {
         "id": str(uuid4()),
@@ -75,36 +81,46 @@ def create_order(
     }
 
     if idempotency_key:
-        idempotency[idempotency_key] = order
+        idempotency_store[idempotency_key] = order
 
-    return JSONResponse(status_code=201, content=order)
+    return JSONResponse(
+        status_code=201,
+        content=order,
+    )
 
 
 @app.get("/orders")
 def list_orders(
     limit: int = 10,
     cursor: str | None = None,
-    x_client_id: str = Header("default", alias="X-Client-Id"),
+    x_client_id: str = Header(default="default", alias="X-Client-Id"),
 ):
-    limited = rate_limit(x_client_id)
+    limited = check_rate_limit(x_client_id)
     if limited:
         return limited
+
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 10
 
     start = 0
 
     if cursor:
         try:
-            start = int(base64.b64decode(cursor).decode())
+            start = int(base64.b64decode(cursor.encode()).decode())
         except Exception:
             start = 0
 
-    end = min(start + max(limit, 1), TOTAL_ORDERS)
+    end = min(start + limit, TOTAL_ORDERS)
+
+    items = catalog[start:end]
 
     next_cursor = None
     if end < TOTAL_ORDERS:
         next_cursor = base64.b64encode(str(end).encode()).decode()
 
     return {
-        "items": catalog[start:end],
+        "items": items,
         "next_cursor": next_cursor,
     }
