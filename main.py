@@ -13,8 +13,10 @@ app = FastAPI(title="Orders API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Retry-After"],
 )
 
 TOTAL_ORDERS = 46
@@ -34,10 +36,7 @@ class OrderRequest(BaseModel):
 def check_rate_limit(client_id: str):
     now = time.time()
 
-    if client_id not in rate_store:
-        rate_store[client_id] = deque()
-
-    q = rate_store[client_id]
+    q = rate_store.setdefault(client_id, deque())
 
     while q and now - q[0] >= WINDOW:
         q.popleft()
@@ -47,7 +46,9 @@ def check_rate_limit(client_id: str):
         return JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
-            headers={"Retry-After": str(retry)},
+            headers={
+                "Retry-After": str(retry)
+            },
         )
 
     q.append(now)
@@ -99,10 +100,8 @@ def list_orders(
     if limited:
         return limited
 
-    try:
-        limit = max(1, int(limit))
-    except Exception:
-        limit = 10
+    if limit < 1:
+        limit = 1
 
     start = 0
 
@@ -114,13 +113,11 @@ def list_orders(
 
     end = min(start + limit, TOTAL_ORDERS)
 
-    items = catalog[start:end]
-
     next_cursor = None
     if end < TOTAL_ORDERS:
         next_cursor = base64.b64encode(str(end).encode()).decode()
 
     return {
-        "items": items,
+        "items": catalog[start:end],
         "next_cursor": next_cursor,
     }
